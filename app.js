@@ -27,10 +27,16 @@ function showToast(message) {
 
 function iconFor(place) { return place.type === 'library' ? '▤' : place.type === 'hall' ? '▦' : '☼'; }
 function heatFor(occupancy) {
-  if (occupancy < 30) return {name:'low', rgb:'53 171 112', label:'Roomy'};
-  if (occupancy < 55) return {name:'mid', rgb:'216 181 53', label:'Filling up'};
-  if (occupancy < 75) return {name:'high', rgb:'239 139 58', label:'Busy'};
-  return {name:'full', rgb:'222 83 81', label:'Nearly full'};
+  if (occupancy < 35) return {name:'low', rgb:'53 171 112', label:'Available'};
+  if (occupancy < 70) return {name:'mid', rgb:'216 181 53', label:'Filling up'};
+  return {name:'high', rgb:'222 83 81', label:'Crowded'};
+}
+function estimateOccupancy(place, hoursAhead) {
+  const trend = [0, 3, 5, 4, 1, -3, -7, -8, -5];
+  const classPressure = place.type === 'hall' ? 5 : place.id === 'union' ? 6 : place.type === 'lounge' ? 2 : 0;
+  const classFactors = [0, .35, .75, 1, .8, .6, .4, .2, 0];
+  const step = Math.max(0, Math.min(8, Math.round(hoursAhead * 2)));
+  return Math.max(4, Math.min(96, Math.round(place.occupancy + trend[step] + classPressure * classFactors[step])));
 }
 function scorePlace(place) {
   let score = place.match;
@@ -56,7 +62,7 @@ function matchesQuickFilters(place) {
   if (searchQuery && !`${place.name} ${place.category}`.toLowerCase().includes(searchQuery)) return false;
   return true;
 }
-function matchesRecommendationPreferences(place) {
+function matchesPersonalPreferences(place) {
   if (preferences.noise === 'quiet' && place.noiseScore > 3) return false;
   if (preferences.noise === 'social' && place.noiseScore < 2) return false;
   if (preferences.outlets && !place.outlets) return false;
@@ -64,11 +70,13 @@ function matchesRecommendationPreferences(place) {
   if (place.walk > preferences.distance) return false;
   if (preferences.space === 'group' && !place.group) return false;
   if (preferences.space === 'solo' && place.group) return false;
-  return matchesQuickFilters(place);
+  return true;
 }
+function matchesRecommendationPreferences(place) { return matchesPersonalPreferences(place) && matchesQuickFilters(place); }
 
 function renderRecommendations() {
   const host = $('#recommendations');
+  renderSmartAlternative();
   const picks = places.filter(matchesRecommendationPreferences).sort((a, b) => scorePlace(b) - scorePlace(a));
   if (!picks.length) {
     host.innerHTML = '<div class="empty-state">No spots match those filters. Try switching one off.</div>';
@@ -119,6 +127,43 @@ function renderMap() {
   });
 }
 
+function renderSmartAlternative() {
+  const crowded = places.map(place => ({place, predicted:Math.max(place.occupancy, estimateOccupancy(place, 1))}))
+    .filter(item => item.predicted >= 65).sort((a, b) => b.predicted - a.predicted)[0];
+  if (!crowded) { $('#smart-alternative').innerHTML = ''; return; }
+  const source = crowded.place;
+  const alternative = places.filter(place => place.id !== source.id && matchesPersonalPreferences(place))
+    .sort((a, b) => scorePlace(b) - scorePlace(a))[0]
+    || places.filter(place => place.id !== source.id).sort((a, b) => scorePlace(b) - scorePlace(a))[0];
+  if (!alternative) { $('#smart-alternative').innerHTML = ''; return; }
+  const heat = heatFor(alternative.occupancy);
+  $('#smart-alternative').innerHTML = `<div class="alt-heading"><span>✳ SMART ALTERNATIVE</span><span class="alt-alert">${crowded.predicted}% expected</span></div>
+    <p><b>${source.name} could be crowded by arrival.</b> Your preferences point to this better-fit option:</p>
+    <button class="alt-place" id="alternative-open" data-place="${alternative.id}"><span class="alt-place-icon">${iconFor(alternative)}</span><span class="alt-place-copy"><b>${alternative.name}</b><small>${alternative.noise} · ${alternative.walk} min walk</small></span><span class="alt-occupancy heat-text-${heat.name}">${alternative.occupancy}%<small>${heat.label}</small></span><span class="alt-arrow">→</span></button>`;
+  $('#alternative-open').addEventListener('click', () => openDetail(alternative.id));
+}
+
+function renderForecast() {
+  const place = places.find(item => item.id === $('#forecast-place').value) || places[0];
+  const selectedHorizon = Number($('.arrival-chip.selected')?.dataset.horizon || 1);
+  const arrivalEstimate = estimateOccupancy(place, selectedHorizon);
+  const openSeats = Math.max(0, Math.round(place.seats * (100 - arrivalEstimate) / 100));
+  const heat = heatFor(arrivalEstimate);
+  $('#arrival-result').innerHTML = `<span>Estimated occupancy in ${selectedHorizon === .5 ? '30 minutes' : `${selectedHorizon} ${selectedHorizon === 1 ? 'hour' : 'hours'}`}</span><b class="heat-text-${heat.name}">${arrivalEstimate}% · ${heat.label.toLowerCase()}</b><small>About ${openSeats} open seats expected</small>`;
+  const direction = arrivalEstimate < place.occupancy ? 'quieter' : arrivalEstimate > place.occupancy ? 'busier' : 'about the same';
+  $('#forecast-insight-title').textContent = `${place.name} should be ${direction}`;
+  $('#forecast-insight-copy').textContent = `${place.occupancy}% now · around ${arrivalEstimate}% when you arrive`;
+  const values = [0, .5, 1, 2, 3, 4].map(hours => hours === 0 ? place.occupancy : estimateOccupancy(place, hours));
+  const points = values.map((value, index) => [index * 136, 145 - value * 1.2]);
+  const line = points.map(([x, y]) => `${x},${y}`).join(' L');
+  $('#forecast-line-path').setAttribute('d', `M${line}`);
+  $('#forecast-area-path').setAttribute('d', `M${line} L680,155 L0,155 Z`);
+  $('#forecast-points').innerHTML = points.map(([cx, cy], index) => `<circle class="chart-point" cx="${cx}" cy="${cy}" r="${index === 0 ? 4 : 3}"/>`).join('');
+  $('.chart-tooltip span').textContent = `In ${selectedHorizon === .5 ? '30 min' : `${selectedHorizon} hr`}`;
+  $('.chart-tooltip b').textContent = `${arrivalEstimate}% occupied`;
+  $('.chart-tooltip small').textContent = `${openSeats} seats estimated`;
+}
+
 function renderDirectory() {
   const host = $('#location-directory');
   let listed = places.filter(matchesQuickFilters).sort((a, b) => lowestFirst ? a.occupancy - b.occupancy : b.occupancy - a.occupancy);
@@ -135,7 +180,7 @@ function renderDirectory() {
 }
 
 function renderAll() {
-  renderRecommendations(); renderSaved(); renderMap(); renderDirectory();
+  renderRecommendations(); renderSaved(); renderMap(); renderDirectory(); renderForecast();
   const count = places.filter(matchesQuickFilters).length;
   $('.result-count').textContent = `· ${count} ${count === 1 ? 'location' : 'locations'}`;
 }
@@ -183,6 +228,24 @@ function openDetail(id) {
   $('#detail-seats').textContent = `~${place.seats} seats available`;
   $('#detail-description').textContent = place.description;
   $('#detail-amenities').innerHTML = place.amenities.map(item => `<span class="amenity">${item}</span>`).join('');
+  const expectedOccupancy = Math.max(place.occupancy, estimateOccupancy(place, 1));
+  let detailAlternative = $('#detail-alternative');
+  if (!detailAlternative) {
+    detailAlternative = document.createElement('div');
+    detailAlternative.id = 'detail-alternative';
+    $('#detail-amenities').after(detailAlternative);
+  }
+  if (expectedOccupancy >= 65) {
+    const alternative = places.filter(item => item.id !== place.id && matchesPersonalPreferences(item))
+      .sort((a, b) => scorePlace(b) - scorePlace(a))[0]
+      || places.filter(item => item.id !== place.id).sort((a, b) => scorePlace(b) - scorePlace(a))[0];
+    detailAlternative.hidden = !alternative;
+    if (alternative) detailAlternative.innerHTML = `<span>✳ SMART BACKUP · ${expectedOccupancy}% expected here in 1 hour</span><button type="button" data-detail-alt="${alternative.id}"><b>${alternative.name}</b><small>${alternative.occupancy}% full · ${alternative.noise} · ${alternative.walk} min walk</small><i>→</i></button>`;
+  } else {
+    detailAlternative.hidden = true;
+    detailAlternative.innerHTML = '';
+  }
+  detailAlternative.querySelector('[data-detail-alt]')?.addEventListener('click', event => openDetail(event.currentTarget.dataset.detailAlt));
   $('#detail-image').style.background = place.type === 'library' ? 'linear-gradient(140deg,#dff1df,#bce5d0 52%,#edf0c7)' : place.type === 'hall' ? 'linear-gradient(140deg,#ffedc7,#f4d9a9 52%,#e8eccb)' : 'linear-gradient(140deg,#f7e5c6,#d9edcc 52%,#ebf2bf)';
   $('#detail-image-emoji').textContent = iconFor(place);
   const heart = $('.detail-heart');
@@ -238,6 +301,11 @@ $('#zoom-in').addEventListener('click', () => { zoom = Math.min(1, zoom + 1); $(
 $('#zoom-out').addEventListener('click', () => { zoom = Math.max(-1, zoom - 1); $('#map-canvas').classList.toggle('zoomed-out', zoom < 0); $('#map-canvas').classList.remove('zoomed'); });
 $('#locate').addEventListener('click', () => { $('#map-canvas').classList.add('locating'); setTimeout(() => $('#map-canvas').classList.remove('locating'), 1600); });
 $('#sort-occupancy').addEventListener('click', () => { lowestFirst = !lowestFirst; $('#sort-occupancy').textContent = lowestFirst ? 'Lowest first ↓' : 'Highest first ↓'; renderDirectory(); });
+$('#forecast-place').addEventListener('change', renderForecast);
+$$('.arrival-chip').forEach(button => button.addEventListener('click', () => {
+  $$('.arrival-chip').forEach(chip => { chip.classList.toggle('selected', chip === button); chip.setAttribute('aria-pressed', String(chip === button)); });
+  renderForecast();
+}));
 $('#detail-go').addEventListener('click', () => showToast('Directions are ready in your campus map.'));
 $('#see-all').addEventListener('click', () => { activeFilters.clear(); $$('.filter-chip').forEach(button => button.classList.remove('selected')); searchQuery = ''; $('#search-input').value = ''; renderAll(); showToast('Showing your best available matches'); });
 $('#map-details').addEventListener('click', () => setView('map'));
