@@ -8,7 +8,8 @@ Open `index.html` in a modern browser. There is no build step or account setup.
 
 ## Prototype features
 
-- Campus map with color-coded occupancy markers and location details.
+- Clickable Discover, Heatmap, Crowd Forecast, and Saved Spots screens for quick navigation.
+- Campus map with a green-to-yellow-to-orange-to-red occupancy heatmap and an ordered list of every study location.
 - Search and quick filters for quiet spaces, outlets, availability, daylight, and group study.
 - Preference-aware recommendations with match scores that respond to feedback.
 - Study-space details, estimated open seats, saved locations, and one-tap feedback.
